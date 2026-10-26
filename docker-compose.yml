@@ -1,0 +1,95 @@
+# Whole platform locally: docker compose up --build
+# Only the gateway is published on the host; the services are reachable only inside the network.
+name: secure-api-gateway
+
+x-jwt-env: &jwt-env
+  JWT_SECRET: ${JWT_SECRET:-local-dev-secret-change-me-0123456789abcdef}
+  JWT_ISSUER: secure-api-gateway
+
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+    volumes:
+      - ./infra/mysql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  auth-service:
+    build:
+      context: .
+      dockerfile: auth-service/Dockerfile
+    environment:
+      <<: *jwt-env
+      DB_URL: jdbc:mysql://mysql:3306/auth_db
+      DB_USERNAME: auth
+      DB_PASSWORD: auth
+      REDIS_HOST: redis
+      # Demo only: creates an admin account on first start.
+      APP_BOOTSTRAPADMIN_USERNAME: admin
+      APP_BOOTSTRAPADMIN_PASSWORD: ${ADMIN_PASSWORD:-Admin-pass-123}
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8082/actuator/health/readiness"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+
+  catalog-service:
+    build:
+      context: .
+      dockerfile: catalog-service/Dockerfile
+    environment:
+      <<: *jwt-env
+      DB_URL: jdbc:mysql://mysql:3306/catalog_db
+      DB_USERNAME: catalog
+      DB_PASSWORD: catalog
+      REDIS_HOST: redis
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8083/actuator/health/readiness"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+
+  api-gateway:
+    build:
+      context: .
+      dockerfile: api-gateway/Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      <<: *jwt-env
+      REDIS_HOST: redis
+      AUTH_SERVICE_URI: http://auth-service:8082
+      CATALOG_SERVICE_URI: http://catalog-service:8083
+    depends_on:
+      auth-service:
+        condition: service_healthy
+      catalog-service:
+        condition: service_healthy
+
+volumes:
+  mysql-data:
